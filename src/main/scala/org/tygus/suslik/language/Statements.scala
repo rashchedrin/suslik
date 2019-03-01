@@ -1,5 +1,7 @@
 package org.tygus.suslik.language
 
+import org.tygus.suslik.logic.Specifications.Goal
+import org.tygus.suslik.synthesis.Subderivation
 import org.tygus.suslik.util.StringUtil._
 
 /**
@@ -50,6 +52,9 @@ object Statements {
               case None =>
                 builder.append(s"${fun.pp}(${args.map(_.pp).mkString(", ")});\n")
             }
+          case SubGoal(subgoal) =>
+            val subgoal_str = "<??\n" + withOffset(subgoal.pp, 2) + "\n??>"
+            builder.append(withOffset(subgoal_str, offset) + "\n")
           case SeqComp(s1,s2) =>
             build(s1, offset)
             build(s2, offset)
@@ -79,6 +84,7 @@ object Statements {
         case Skip => acc
         case Error => acc
         case Magic => acc
+        case SubGoal(_) => acc // todo: idk if it is correct
         case Store(to, off, e) =>
           acc ++ to.collect(p) ++ e.collect(p)
         case Load(_, _, from, off) =>
@@ -114,9 +120,33 @@ object Statements {
       case Malloc(to, _, _) => 1 + to.size
       case Free(x) => 1 + x.size
       case Call(_, fun, args) => 1 + args.map(_.size).sum
+      case SubGoal(_) => 1 // todo: idk if it is correct
       case SeqComp(s1,s2) => s1.size + s2.size
       case If(cond, tb, eb) => 1 + cond.size + tb.size + eb.size
       case Guarded(cond, b) => 1 + cond.size + b.size
+    }
+
+    def replace(target:Statement, replacement:Statement):Statement = this match {
+      case `target` => replacement
+
+      case stmt@Skip => stmt
+      case stmt@Error => stmt
+      case stmt@Magic => stmt
+      case stmt@Store(to, off, e) => stmt
+      case stmt@Load(to, _, from, _) => stmt
+      case stmt@Malloc(to, _, _) => stmt
+      case stmt@Free(x) => stmt
+      case stmt@Call(_, fun, args) => stmt
+      case stmt@SubGoal(_) => stmt
+
+      // propagate
+      case SeqComp(s1,s2) => SeqComp(s1.replace(target,replacement), s2.replace(target, replacement))
+      case If(cond, tb, eb) => If(cond, tb.replace(target, replacement), eb.replace(target, replacement))
+      case Guarded(cond, b) =>  Guarded(cond, b.replace(target, replacement))
+    }
+
+    def extendWithSketch(goal: Goal, sketch:Statement): Statement = {
+      this.replace(target = SubGoal(goal), replacement = sketch)
     }
   }
 
@@ -146,6 +176,8 @@ object Statements {
   // or
   // let to = f(args); rest
   case class Call(to: Option[(Var, SSLType)], fun: Var, args: Seq[Expr]) extends Statement
+
+  case class SubGoal(goal:Goal) extends Statement
 
   case class SeqComp(s1: Statement, s2: Statement) extends Statement {
     def simplify: Statement = {

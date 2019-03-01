@@ -1,7 +1,9 @@
 package org.tygus.suslik.synthesis
 
+import org.tygus.suslik.language.Expressions.{IntConst, Var}
 import org.tygus.suslik.logic.Specifications._
 import org.tygus.suslik.language.PrettyPrinting
+import org.tygus.suslik.language.Statements.{Call, Statement, SubGoal}
 import org.tygus.suslik.logic._
 
 /**
@@ -64,6 +66,12 @@ case class Subderivation(subgoals: Seq[Goal], kont: StmtProducer)
 
   override def pp: String =
     s"${subgoals.size} subgoal(s):\n${subgoals.map { g => s"${g.env.pp}${g.pp}" }.mkString("\n")}"
+
+  def toSketch:Statement = {
+    val dummy_statements: Seq[Statement] = subgoals.map(SubGoal)
+    val sketch = kont(dummy_statements)
+    sketch
+  }
 }
 
 

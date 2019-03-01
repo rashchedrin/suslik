@@ -40,7 +40,7 @@ trait Synthesis extends SepLogicUtils {
     val stats = new SynStats()
     SMTSolving.init()
     try {
-      synthesize(goal, config.startingDepth)(stats = stats, rules = nextRules(goal, config.startingDepth)) match {
+      synthesize(goal, config.startingDepth)(stats = stats, rules = nextRules(goal, config.startingDepth), SubGoal(goal)) match {
         case Some(body) =>
           val proc = Procedure(name, tp, formals, body)
           Some((proc, stats))
@@ -58,17 +58,20 @@ trait Synthesis extends SepLogicUtils {
 
   private def synthesize(goal: Goal, depth: Int) // todo: add goal normalization
                         (stats: SynStats,
-                         rules: List[SynthesisRule])
+                         rules: List[SynthesisRule], accumulated_sketch:Statement)
                         (implicit ind: Int = 0): Option[Statement] = {
-    lazy val res: Option[Statement] = synthesizeInner(goal, depth)(stats, rules)(ind)
+    lazy val res: Option[Statement] = synthesizeInner(goal, depth)(stats, rules, accumulated_sketch)(ind)
     memo.runWithMemo(goal, stats, rules, res)
   }
 
   private def synthesizeInner(goal: Goal, depth: Int)
                              (stats: SynStats,
-                              rules: List[SynthesisRule])
+                              rules: List[SynthesisRule], accumulated_sketch:Statement)
                              (implicit ind: Int = 0): Option[Statement] = {
     implicit val config: SynConfig = goal.env.config
+    if(accumulated_sketch.replace(SubGoal(goal), Skip) == accumulated_sketch){ // todo: remove (?)
+      throw SynthesisException("Sketch doesn't contain goal")
+    }
 
     if (config.printEnv) {
       printLog(List((s"${goal.env.pp}", Console.MAGENTA)))
@@ -85,7 +88,7 @@ trait Synthesis extends SepLogicUtils {
       return None
     }
 
-    def tryRules(rules: List[SynthesisRule]): Option[Statement] = rules match {
+    def tryRules(rules: List[SynthesisRule], recieved_accumulated_sketch:Statement): Option[Statement] = rules match {
       case Nil => None
       case r :: rs =>
 
@@ -114,7 +117,7 @@ trait Synthesis extends SepLogicUtils {
               // Backtrack application of this rule
               stats.bumpUpBacktracing()
               printLog(List((s"${r.toString} All sub-derivations failed: backtrack.", MAGENTA)))
-              tryRules(rs)
+              tryRules(rs, recieved_accumulated_sketch)
             }
         }
 
@@ -124,10 +127,12 @@ trait Synthesis extends SepLogicUtils {
           // Optimization: if one of the subgoals failed, to not try the rest!
           // <ugly-imperative-code>
           val results = new ListBuffer[Statement]
+          val new_accumulated_sketch = accumulated_sketch.extendWithSketch(goal, s.toSketch)
+          assert(new_accumulated_sketch != accumulated_sketch)
           import util.control.Breaks._
           breakable {
             for {subgoal <- s.subgoals} {
-              synthesize(subgoal, depth - 1)(stats, nextRules(subgoal, depth - 1))(ind + 1) match {
+              synthesize(subgoal, depth - 1)(stats, nextRules(subgoal, depth - 1), new_accumulated_sketch)(ind + 1) match {
                 case Some(s) => results.append(s)
                 case _ => break
               }
@@ -153,13 +158,18 @@ trait Synthesis extends SepLogicUtils {
                 case g@Guarded(_, _) if depth < config.startingDepth => // Can propagate to upper-level goal
                   Some(g)
                 case _ => // Cannot propagate: try to synthesize else branch
-                  val goal = s.subgoals.head
-                  val newPre = goal.pre.copy(phi = goal.pre.phi && cond.not)
+                  val subgoal = s.subgoals.head
+                  val elsePre = subgoal.pre.copy(phi = subgoal.pre.phi && cond.not)
                   // Set starting depth to current depth: new subgoal will start at its own starting depth
                   // to disallow producing guarded statements
-                  val newConfig = goal.env.config.copy(startingDepth = depth)
-                  val newG = goal.copy(newPre, env = goal.env.copy(config = newConfig))
-                  synthesize(newG, depth)(stats, nextRules(newG, depth - 1))(ind) match {
+                  val newConfig = subgoal.env.config.copy(startingDepth = depth)
+                  val elseGoal = subgoal.copy(elsePre, env = subgoal.env.copy(config = newConfig))
+                  val else_subgoals = s.subgoals.updated(0, elseGoal)
+                  val else_subderivation = s.copy(subgoals = else_subgoals)
+                  val solution_sketch = If(cond, thn, else_subderivation.toSketch)
+                  val new_accumulated_sketch = accumulated_sketch.extendWithSketch(goal, solution_sketch)
+                  assert(new_accumulated_sketch != accumulated_sketch) // todo: remove this line (?)
+                  synthesize(elseGoal, depth)(stats, nextRules(elseGoal, depth - 1), new_accumulated_sketch)(ind) match {
                     case Some(els) => Some(s.kont(List(If(cond, thn, els)))) // successfully synthesized else
                     case _ => None // failed to synthesize else
                   }
@@ -192,12 +202,23 @@ trait Synthesis extends SepLogicUtils {
         if (subderivations.isEmpty) {
           // Rule not applicable: try the rest
           printLog(List((s"$goalStr${RED}FAIL", BLACK)), isFail = true)
-          tryRules(rs)
+          tryRules(rs, recieved_accumulated_sketch)
         } else {
           // Rule applicable: try all possible sub-derivations
           val subSizes = subderivations.map(s => s"${s.subgoals.size} sub-goal(s)").mkString(", ")
           val succ = s"SUCCESS at depth $ind, ${subderivations.size} alternative(s) [$subSizes]"
           printLog(List((s"$goalStr$GREEN$succ", BLACK)))
+          for (subderiv <- subderivations){
+            val joined_sketch = recieved_accumulated_sketch.extendWithSketch(goal, subderiv.toSketch)
+            printLog(List((recieved_accumulated_sketch.pp, RED)))
+            printLog(List((goal.pp, YELLOW)))
+            printLog(List((subderiv.toSketch.pp, GREEN)))
+            printLog(List((joined_sketch.pp, BLACK)))
+            if(joined_sketch == recieved_accumulated_sketch){
+              printLog(List(("IDENTICAL!", RED)))
+            }
+          }
+
           stats.bumpUpSuccessfulRuleApp()
           if (subderivations.size > 1) {
             printLog(List((s"Trying alternative sub-derivation 1:", CYAN)))
@@ -206,7 +227,7 @@ trait Synthesis extends SepLogicUtils {
         }
     }
 
-    tryRules(rules)
+    tryRules(rules, accumulated_sketch)
   }
 
   private def getIndent(implicit i: Int): String = if (i <= 0) "" else "|  " * i
