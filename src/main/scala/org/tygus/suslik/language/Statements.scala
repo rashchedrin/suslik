@@ -148,9 +148,6 @@ object Statements {
       case Guarded(cond, b) =>  Guarded(cond, b.replace(target, replacement))
     }
 
-    def extendWithSketch(goal: Goal, sketch:Statement): Statement = {
-      this.replace(target = SubGoal(goal), replacement = sketch)
-    }
   }
 
   // skip;
