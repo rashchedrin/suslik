@@ -84,7 +84,7 @@ object Statements {
         case Skip => acc
         case Error => acc
         case Magic => acc
-        case SubGoal(_) => acc // todo: idk if it is correct
+        case SubGoal(g) => acc // todo: this is actually incorrect
         case Store(to, off, e) =>
           acc ++ to.collect(p) ++ e.collect(p)
         case Load(_, _, from, off) =>
@@ -108,7 +108,10 @@ object Statements {
       collector(Set.empty)(this)
     }
 
-    def usedVars: Set[Var] = collectE(_.isInstanceOf[Var])
+    def usedVars: Set[Var] = this match{
+      case SubGoal(g) => g.programVars.toSet // todo: this looks like a crutch
+      case _ => collectE(_.isInstanceOf[Var])
+    }
 
     // Statement size in AST nodes
     def size: Int = this match {
