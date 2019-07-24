@@ -9,6 +9,7 @@ import org.tygus.suslik.synthesis.rules.Rules._
 
 import scala.Console._
 import scala.annotation.tailrec
+import scala.collection.mutable.ArrayBuffer
 
 /**
   * @author Nadia Polikarpova, Ilya Sergey
@@ -49,17 +50,45 @@ trait Synthesis extends SepLogicUtils {
     }
   }
 
+
+  /*
+  * goal is
+  * Unsolvable: all child clauses has unsolvable subgoal. Permanent for goal
+  * Solved: has child clause, such that all subgoals there are solved. Permanent for goal
+  * Useless: for all clauses, there exists at least one unsolvable goal in same conjunction
+  * */
+  case class GoalInfo(isSolved:Boolean,
+                      isUnsolvable:Boolean,
+                      isUseless:Boolean){}
+
   protected def synthesize(goal: Goal)
                           (stats: SynStats)
                           (implicit ind: Int = 0): Option[Solution] = {
-    // Initialize worklist with a single subderivation
-    // whose sole open goal is the top-level goal
-    val worklist = Vector(Subderivation(List(goal), idProducer("init")))
-    processWorkList(worklist)(stats, goal.env.config, ind)
+    // Initialize boundary with a single goal
+    // goal <== goal
+    val boundary = Vector(goal)
+    val goalsInfo: collection.mutable.Map[Goal, GoalInfo] =
+      collection.mutable.Map(goal -> GoalInfo(
+        isSolved = false,
+        isUnsolvable = false,
+        isUseless = false)
+      )
+    processBoundary(goal, boundary, Nil, goalsInfo)(stats, goal.env.config, ind)
+  }
+
+  private def ConstructSolution(target: Specifications.Goal,
+                                goalsInfo: collection.mutable.Map[Goal, GoalInfo],
+                                implications: Seq[GoalsImplication]): Option[Solution]= {
+    assert(goalsInfo(target).isSolved)
+
   }
 
   @tailrec
-  private def processWorkList(worklist: Seq[Subderivation])
+  private def processBoundary(target:Goal,
+                              boundary: Seq[Goal],
+                              knownClauses: Seq[GoalsImplication],
+                              goalsInfo: collection.mutable.Map[Goal, GoalInfo] // todo: use labels
+                             )
                              (implicit
                               stats: SynStats,
                               config: SynConfig,
@@ -71,20 +100,20 @@ trait Synthesis extends SepLogicUtils {
       throw SynTimeOutException(s"\n\nThe derivation took too long: more than ${config.timeOut.toDouble / 1000} seconds.\n")
     }
 
-    val sz = worklist.length
-    printLog(List((s"\nWorklist ($sz): ${worklist.map(_.pp).mkString(" ")}", Console.YELLOW)))
+    val sz = boundary.length
+    printLog(List((s"\nboundary ($sz): ${boundary.map(_.pp).mkString(" ")}", Console.YELLOW)))
     stats.updateMaxWLSize(sz)
 
-    worklist match {
-      case Nil =>
-        // No more subderivations to try: synthesis failed
-        None
-      case subderiv +: rest => subderiv.subgoals match {
-        // Otherwise pick a subderivation to expand
+    if (goalsInfo(target).isSolved) { // enough information to construct the solution
+      ConstructSolution(target, goalsInfo, knownClauses)
+    }else if(goalsInfo(target).isUnsolvable){
+      None
+    }else {
+      boundary match {
         case Nil =>
-          // This subderivation has no open goals: synthesis succeeded, build the solution
-          Some(subderiv.kont(Nil))
-        case goal :: moreGoals => {
+          // No more subgoals to try: synthesis failed
+          None
+        case goal +: moreGoals => {
           // Otherwise, expand the first open goal
           printLog(List((s"Goal to expand: ${goal.label.pp} (depth: ${goal.depth})", Console.BLUE)))
           stats.updateMaxDepth(goal.depth)
@@ -97,24 +126,75 @@ trait Synthesis extends SepLogicUtils {
           // each of which can have multiple open goals
           val rules = nextRules(goal, 0)
           val children =
-            if (goal.isUnsolvable) Nil  // This is a special unsolvable goal, discard eagerly
+            if (goal.isUnsolvable || goalsInfo(goal).isUseless) Nil // No use of expanding this goal, discard eagerly
             else applyRules(rules)(goal, stats, config, ind)
 
           if (children.isEmpty) {
             stats.bumpUpBacktracing()
             printLog(List((s"Cannot expand goal: BACKTRACK", Console.RED)))
+            MaybeUpdateParentsUnsolvableRecursive()
           }
 
-          val newSubderivations = children.map(child => {
-            // To turn a child into a valid subderivation,
-            // add the rest of the open goals from the current subderivation,
-            // and set up the solution producer to join results from all the open goals
-            Subderivation(child.subgoals ++ moreGoals, child.kont >> subderiv.kont)
-          })
+          val newClauses = for {
+            subderivation <- children
+          } yield GoalsImplication(subderivation.subgoals, subderivation.kont, goal) // todo: change to letters
+          val newKnownClauses = knownClauses ++ newClauses
+
+          // update uselesness
+          for(subderivation <- children){
+            var subderivationIsUseless = false
+            for(subgoal <- subderivation.subgoals){
+              if(subgoal.isUnsolvable || goalsInfo(subgoal).isUnsolvable){
+                subderivationIsUseless = true
+              }
+            }
+            if(!subderivationIsUseless){
+              for(subgoal <- subderivation.subgoals){
+                goalsInfo(subgoal) = goalsInfo(subgoal).copy(isUseless = false)
+              }
+            }
+          }
+
+          // update solved
+          for(subderivation <- children){
+            if(subderivation.subgoals.isEmpty){
+              // our current goal is solved!
+              for(parent <- parents(goal)) {
+                RecursiveUpdateIsSolved(parent)
+              }
+            }
+          }
+
+          // update boundary
+          val newBoundary_ : ArrayBuffer[Goal] = ArrayBuffer()
+          for(subderivation <- children){
+            for(subgoal <- subderivation.subgoals){
+              if(!goalsInfo.contains(subgoal)){
+                goalsInfo(subgoal) = GoalInfo(
+                  isSolved = false,
+                  isUnsolvable = subgoal.isUnsolvable,
+                  isUseless = false)
+                newBoundary_ += subgoal
+              }
+            }
+          }
+          newBoundary_ ++= moreGoals
+          val newBoundary = if (config.depthFirst) newBoundary_ else newBoundary_.sortBy(_.cost)
+
+
+
+//          val newSubderivations = children.map(child => {
+//            // To turn a child into a valid subderivation,
+//            // add the rest of the open goals from the current subderivation,
+//            // and set up the solution producer to join results from all the open goals
+//            Subderivation(child.subgoals ++ moreGoals, child.kont >> subgoal.kont)
+//          })
+
           // Add new subderivations to the worklist, sort by cost and process
-          val newWorkList_ = newSubderivations ++ rest
-          val newWorkList = if (config.depthFirst) newWorkList_ else newWorkList_.sortBy(_.cost)
-          processWorkList(newWorkList)
+//          val newWorkList_ = newSubderivations ++ rest
+//          val newWorkList = if (config.depthFirst) newWorkList_ else newWorkList_.sortBy(_.cost)
+          processBoundary(target, newBoundary, newKnownClauses, goalsInfo)
+
         }
       }
     }

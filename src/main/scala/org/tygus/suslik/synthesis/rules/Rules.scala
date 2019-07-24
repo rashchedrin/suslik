@@ -118,6 +118,17 @@ object Rules {
     lazy val cost: Int = subgoals.map(_.cost).sum
   }
 
+  case class GoalsImplication(subgoals: Seq[Goal], kont: StmtProducer, goal: Goal, isBiimplication: Boolean = false)
+    extends PrettyPrinting with PureLogicUtils {
+
+    override def pp: String = s"[${goal.label.pp} <== ${subgoals.map(_.label.pp).mkString(", ")}]($cost)"
+
+    /**
+      * Cost of a subderivation
+      */
+    lazy val cost: Int = subgoals.map(_.cost).sum
+  }
+
   /**
     * A generic class for a deductive rule to be applied
     *
